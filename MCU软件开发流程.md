@@ -1,5 +1,161 @@
 # MCU软件开发流程
 
+## 零、现有工程实现状态标识（260525_WRMctrlG47X_bd_HSO）
+
+### 1. 检查对象与状态说明
+
+- 检查对象：`D:\Work\important_doc\260525_WRMctrlG47X_bd_HSO\WRMctrlG47X_bd_HSO`。
+- 另有同名工程：`D:\Work\260211_MCU\07_Firmware (固件MCU下位机)\260525_WRMctrlG47X_bd_HSO`，文件数量和总体大小几乎一致；本次以更新时间较新的`important_doc`目录为准。
+- 判定依据优先级：Keil工程`MDK-ARM\WRMctrlG47X_bd.uvprojx`实际编译文件 > 源码调用链 > 头文件/配置宏 > 文档或备份文件。
+- 状态标签含义：
+  - `[已实现]`：已在Keil工程中编译，并能看到初始化、调用链或寄存器接口。
+  - `[部分实现]`：核心代码存在并部分接入，但存在默认关闭、故障未闭环、参数未持久化、保护未联动等缺口。
+  - `[预留/未接入]`：有文件、结构或宏定义，但未看到有效调用链，或未被Keil工程编译。
+  - `[未发现实现]`：在当前工程源码、工程文件和配置中未检索到可用实现。
+
+### 2. 工程总体实现概况
+
+- `[已实现]` STM32G473VETx + Keil MDK 工程，目标名为`WRMctrlG47X_bd`，工程宏包含`STM32G473xx`和`SAVE_PARAM_EN=1`。
+  - 依据：`MDK-ARM\WRMctrlG47X_bd.uvprojx`。
+- `[已实现]` 基于ST MCSDK 6.4.1的单电机PMSM FOC工程，已编译MCSDK核心模块，包括PWM电流采样、FOC任务、速度/转矩控制、PID、弱磁、母线电压、温度、编码器抽象、STO-PLL、MCP/ASPEP通信等。
+  - 依据：`MCSDK_v6.4.1-Full`、`Src\mc_tasks.c`、`Src\mc_tasks_foc.c`、`Src\mc_config.c`、`MDK-ARM\WRMctrlG47X_bd.uvprojx`。
+- `[已实现]` 主控外设初始化包括GPIO、DMA、ADC1/ADC2、DAC1、CORDIC、TIM1、TIM2、USART1。
+  - 依据：`Src\main.c`。
+- `[已实现]` 控制主循环采用MCSDK调度模型，高频FOC任务在PWM/ADC相关中断链路执行，中频任务处理状态机、速度环、保护和通信。
+  - 依据：`Src\mc_tasks.c`、`Src\stm32g4xx_mc_it.c`、`Src\mc_tasks_foc.c`。
+
+### 3. 底层架构与硬件链路
+
+- `[已实现]` TIM1三相互补PWM、死区、六路PWM引脚、低边驱动控制已配置。
+  - 依据：`Src\main.c`、`Src\pwm_curr_fdbk.c`、`Inc\drive_parameters.h`。
+- `[部分实现]` BKIN/硬件刹车引脚有引脚和极性配置痕迹，但当前`TIM_BDTRInitStruct.BreakState = LL_TIM_BREAK_DISABLE`，说明硬件Break未真正启用。
+  - 依据：`Src\main.c`中`PE15 -> TIM1_BKIN`、`LL_TIM_SetBreakInputSourcePolarity`、`BreakState = LL_TIM_BREAK_DISABLE`。
+- `[已实现]` ADC1/ADC2注入采样由`TIM1_TRGO`触发，用于双电流采样；规则通道用于母线电压、温度等慢变量。
+  - 依据：`Src\main.c`、`Src\regular_conversion_manager.c`、`Src\mc_tasks.c`。
+- `[已实现]` ICS双电流采样链路接入MCSDK PWM Current Feedback，包含电流读取、偏置校准、PWM开关、低边导通、RL检测接口。
+  - 依据：`Src\mc_config.c`中的`PWMC_ICS_Handle_t PWM_Handle_M1`，以及`Src\mc_tasks_foc.c`中的`PWMC_CurrentReadingCalibr`。
+- `[已实现]` 电流零点偏置校准接入状态机，在`OFFSET_CALIB`状态执行。
+  - 依据：`Src\mc_tasks_foc.c`。
+- `[未发现实现]` 三相电流增益一致性校准、采样电阻/运放增益标定、运行期`Ia + Ib + Ic`残差诊断未看到专门实现。
+- `[部分实现]` 母线电压、温度采样和过压/欠压/过温保护已接入MCSDK安全任务，但未看到温度线性降额或温升斜率保护。
+  - 依据：`Src\mc_tasks.c`、`Inc\drive_parameters.h`。
+- `[已实现]` DAC双通道调试输出框架已编译并在高频任务中执行。
+  - 依据：`Src\dac_ui.c`、`Src\mc_tasks.c`。
+- `[已实现]` CPU性能测量和MCPA数据记录链路已接入高频任务。
+  - 依据：`Src\mc_tasks.c`、`Src\mc_perf.c`、`Src\sync_registers.c`。
+
+### 4. 旋变/RVDT与位置反馈
+
+- `[已实现]` AD2S1210/RVDT并行总线驱动已实现，包含模式切换、寄存器读写、分辨率设置、激励频率设置、位置/速度读取、DOS/LOT故障位读取。
+  - 依据：`Src\RVDT.c`、`Inc\RVDT.h`、`Inc\main.h`中的AD2S1210相关GPIO。
+- `[已实现]` RVDT在`main()`中初始化：`AD2S1210_Init(&RTFPare, 4, 92)`。
+  - 依据：`Src\main.c`。
+- `[已实现]` RVDT已接入主FOC角度链路：工程重写/覆盖了`ENC_CalcAngle()`和`ENC_CalcAvrgMecSpeedUnit()`，内部从AD2S1210读取电角度、机械角度和速度，再通过MCSDK的`ENCODER_M1`抽象提供给FOC。
+  - 依据：`Src\main.c`、`Src\mc_tasks_foc.c`。
+- `[已实现]` RVDT参数和角度可通过MCP寄存器读写，包括极对数、初始电角度、原始角度、S16电角度。
+  - 依据：`Inc\register_interface.h`、`Src\sync_registers.c`。
+- `[部分实现]` RVDT故障位已读取到`RTFPare.Fault_DOSLOT`并影响本地`Move_State`，但未看到直接上报到MCSDK故障状态机的闭环。
+  - 依据：`Src\RVDT.c`。
+- `[部分实现]` RVDT自动对齐函数`RVDT_Motor_Alignment()`存在，但未看到状态机中稳定调用该函数完成产线式自动零位对齐。
+  - 依据：`Src\RVDT.c`。
+
+### 5. 电机参数辨识、自整定与参数管理
+
+- `[已实现]` SCC电机参数辨识框架已接入，当前由`mp_self_com_ctrl.c`替代旧`motor_id_fsm`实现，覆盖Rs、Ls/Ld/Lq、Ke/BEMF辨识状态机。
+  - 依据：`Src_sensorless\libmp_replace\mp_self_com_ctrl.c`、`Src\mc_tasks.c`、`Src\mc_tasks_foc.c`。
+- `[已实现]` SCC高频任务在辨识激活时抢占普通FOC路径，执行采样、Clarke/Park、滤波、峰值检测和辨识电压输出。
+  - 依据：`Src\mc_tasks.c`中的`SCC_IsActive()`、`SCC_HF()`、`SCC_SetPhaseVoltage()`。
+- `[已实现]` SCC中频任务处理Rs、Ls、BEMF子状态机。
+  - 依据：`Src_sensorless\libmp_replace\mp_self_com_ctrl.c`、`Src\mc_tasks_foc.c`。
+- `[已实现]` OTT一键速度环自整定已实现，采用阶跃响应法估算惯量J、摩擦F并计算速度环PI。
+  - 依据：`Src_sensorless\libmp_replace\mp_one_touch_tuning.c`。
+- `[已实现]` OTT可通过MCP寄存器启动/停止，并可读状态、原始Kp/Ki、J、F、带宽等信息。
+  - 依据：`Inc\register_interface.h`、`Src\sync_registers.c`。
+- `[预留/未接入]` 电流环PI自整定函数`CurrPI_Tune()`已编译，公式基于Rs/Ld/Lq和目标带宽，但当前未检索到调用点。
+  - 依据：`Src\curr_pi_tune.c`、`Inc\curr_pi_tune.h`。
+- `[已实现]` 多段速度PID已启用，按速度区间动态切换Kp/Ki和分频系数。
+  - 依据：`Inc\drive_parameters.h`中的`MOTOR_MULTIPID_ENABLE 1`、`Src\motor_param.c`、`Src\mc_tasks_foc.c`。
+- `[已实现]` 电机参数管理结构`MotorParam`已实现，包含极对数、额定转速、额定电流、Rs、Ld、Lq、Ke、母线阈值、最大电流、多段速度PID。
+  - 依据：`Src\motor_param.c`、`Inc\motor_param.h`。
+- `[部分实现]` FlashDB/FAL参数持久化已启用并接入内部Flash，启动时加载，寄存器命令可触发保存；但弱磁/前馈参数当前保存为0且恢复处标注“restore when implemented”，故障日志/TSDB未接入。
+  - 依据：Keil宏`SAVE_PARAM_EN=1`、`Src\main.c`、`Src\param_store.c`、`FlashDB\port\fal\samples\porting\fal_cfg.h`、`fal_flash_stm32g4_port.c`。
+- `[预留/未接入]` 24C64 EEPROM/I2C驱动已编译和初始化，但当前参数库实际走内部FlashDB/FAL；EEPROM更像遗留或备用路径。
+  - 依据：`Src\EEPROM24CXX.c`、`Src\i2c.c`、`Src\main.c`、`Inc\drive_parameters.h`中的`USE_INTERNAL_FLASH_PARAM 1`。
+
+### 6. 核心闭环控制与高级控制
+
+- `[已实现]` PMSM FOC电流闭环、速度闭环、转矩模式/速度模式、SVPWM/圆限幅等MCSDK基础控制链路已接入。
+  - 依据：`Src\mc_tasks_foc.c`、`Src\speed_torq_ctrl.c`、`Src\mc_interface.c`。
+- `[已实现]` 默认控制模式为速度模式，默认目标转速1000rpm。
+  - 依据：`Inc\drive_parameters.h`。
+- `[已实现]` 弱磁控制已接入，包含`FW_M1`、`PIDFluxWeakeningHandle_M1`、`FW_Init()`、`FW_CalcCurrRef()`、`FW_DataProcess()`，并通过MCP寄存器读写`FLUXWK_KP/KI/BUS/BUS_MEAS`等参数。
+  - 依据：`Src\mc_config.c`、`Src\mc_tasks_foc.c`、`Src\sync_registers.c`。
+- `[部分实现]` 前馈解耦组件已初始化并有寄存器读取，但`USE_FEEDFORWARD_DECOUPLING`当前为0，FOC计算中相关逻辑被编译开关关闭。
+  - 依据：`Inc\mc_config.h`、`Src\mc_tasks_foc.c`、`Src\sync_registers.c`。
+- `[已实现]` STO-PLL无感观测器已编译、初始化，并有完整Sensorless中频/高频路径；但当前默认驱动模式设置为`MCI_DRIVE_SENSORED`，即默认走RVDT/Encoder抽象。
+  - 依据：`Src_sensorless\sto_pll_speed_pos_fdbk.c`、`Src\mc_config.c`、`Src\mc_tasks_foc.c`。
+- `[部分实现]` 飞车/顺风启动只看到Sensorless路径中的BEMF停止检测、RevUp和SwitchOver逻辑，未看到完整“PWM关闭静默观测当前速度角度并无缝并入FOC”的成品级流程。
+  - 依据：`Src\mc_tasks_foc.c`中的`WAIT_STOP_MOTOR`、`SCC_DetectBemf()`、`START`、`SWITCH_OVER`。
+- `[未发现实现]` HFI零速注入、SMO/EKF观测器未看到接入；当前无感主线为STO-PLL。
+- `[未发现实现]` MTPA/MTPV没有实际控制实现，仅见配置标志或注释。
+- `[未发现实现]` 死区补偿、逆变器非线性标定曲线、导通压降/开关延迟补偿未看到专门实现。
+- `[未发现实现]` BLDC六步控制、ACIM控制内核、多电机控制内核切换未看到实际接入；当前工程是单电机PMSM FOC。
+
+### 7. 通信、上位机与寄存器接口
+
+- `[已实现]` UART + ASPEP + MCP通信已接入，支持Motor Pilot风格寄存器读写、同步/异步数据包、数据日志。
+  - 依据：`Src\aspep.c`、`Src\usart_aspep_driver.c`、`Src\mcp.c`、`Src\sync_registers.c`。
+- `[已实现]` 自定义寄存器覆盖RVDT、SCC/OTT、弱磁、多段PID、参数保存、性能统计等。
+  - 依据：`Inc\register_interface.h`、`Src\sync_registers.c`、`Src\motor_identification_registers.c`。
+- `[已实现]` 上位机配置文件存在，包括QML和RegList JSON。
+  - 依据：`上位机配置文件\`、根目录`MC_FOC_SDK_WRMctrlG47X.qml`、`RegListSTM_WRMctrlG47X.json`。
+- `[未发现实现]` CAN/CANFD/CANopen/DS402未接入；`HAL_FDCAN_MODULE_ENABLED`处于注释状态，未看到FDCAN初始化或CANopen协议栈。
+  - 依据：`Inc\stm32g4xx_hal_conf.h`、源码检索。
+
+### 8. 状态机、保护与安全动作
+
+- `[已实现]` MCSDK状态机已接入，包含`IDLE`、`OFFSET_CALIB`、`CHARGE_BOOT_CAP`、`ALIGNMENT`、`START`、`SWITCH_OVER`、`RUN`、`STOP`、`WAIT_STOP_MOTOR`、`FAULT_NOW`、`FAULT_OVER`等路径。
+  - 依据：`Src\mc_tasks_foc.c`。
+- `[已实现]` 故障处理包含过温、过压、欠压、PWM/驱动故障、启动失败、FOC执行超时等MCSDK故障路径。
+  - 依据：`Src\mc_tasks.c`、`Src\mc_tasks_foc.c`、`Inc\mc_type.h`。
+- `[部分实现]` 高速严重故障时的主动短路ASC未实现；当前过压策略为`TURN_OFF_PWM`，未看到按高速弱磁场景强制导通上三桥/下三桥的逻辑。
+  - 依据：`Inc\drive_parameters.h`、`Src\mc_tasks.c`、`Src\pwm_curr_fdbk.c`。
+- `[未发现实现]` 高压预充继电器、主继电器、主动泄放MOS/电阻控制未看到实现；`CHARGE_BOOT_CAP`是MCSDK自举电容充电状态，不等价于高压母线预充。
+- `[未发现实现]` 温度线性降额、母线主动泄放、故障黑匣子写入FlashDB未看到实现。
+
+### 9. 已有但不应误判为完成的内容
+
+- `[预留/未接入]` `Src\bemf_vf_ctrl.c`存在，但未出现在Keil工程编译文件列表；当前BEMF辨识主实现应以`mp_self_com_ctrl.c`中的SCC路径为准。
+- `[预留/未接入]` `Src\accel_decel_q15.c`已编译，但主要用于旧BEMF/VF加减速辅助，当前未看到有效业务调用点。
+- `[预留/未接入]` `Src\motor_id_hftask.c`存在且有函数，但工程实际注释说明旧`MOTOR_ID_HighFrequencyTask`已由SCC框架替代。
+- `[预留/未接入]` Hall相关头文件、BLDC相关备份文件存在，但当前Keil工程未编译Hall控制源文件，也未见六步控制路径。
+- `[预留/未接入]` MCSDK中存在位置模式枚举和速度/转矩接口，但未看到位置环、电子齿轮、电子凸轮、S曲线轨迹规划等应用层实现。
+
+### 10. 与本流程文档的对照结论
+
+| 流程模块 | 当前工程状态 | 说明 |
+| --- | --- | --- |
+| MCSDK移植、PWM、ADC、FOC基础闭环 | `[已实现]` | STM32G473 + MCSDK 6.4.1，单电机PMSM FOC主链路完整。 |
+| 电流偏置校准 | `[已实现]` | MCSDK offset calibration已接入状态机。 |
+| 电流增益校准 | `[未发现实现]` | 未见三相增益标定和残差诊断。 |
+| RVDT/旋变解码 | `[已实现]` | AD2S1210驱动已接入MCSDK Encoder抽象并参与FOC角度。 |
+| 相序/零位自动对齐 | `[部分实现]` | MCSDK Encoder Alignment和RVDT对齐函数存在，但RVDT产线式自动对齐调用链不完整。 |
+| Rs/Ld/Lq/Ke辨识 | `[已实现]` | SCC替代库实现Rs、Ls、BEMF/Ke辨识。 |
+| 电流环自整定 | `[预留/未接入]` | `CurrPI_Tune()`存在但未被调用。 |
+| 速度环OTT自整定 | `[已实现]` | OTT阶跃响应法已接入寄存器和任务。 |
+| 多段速度PID | `[已实现]` | 宏启用，RUN中按速度段切换。 |
+| 弱磁控制 | `[已实现]` | MCSDK FW已接入FOC和寄存器。 |
+| 前馈解耦 | `[部分实现]` | 组件存在但编译开关关闭。 |
+| 无感STO-PLL | `[部分实现]` | 路径完整但默认模式为Sensored。 |
+| 飞车顺风启动 | `[部分实现]` | 有BEMF检测/RevUp/SwitchOver痕迹，不是完整静默观测并入。 |
+| MTPA/MTPV | `[未发现实现]` | 仅见标志/注释。 |
+| FlashDB参数保存 | `[部分实现]` | 核心PID/SCC/多段PID可保存，弱磁/FF/故障日志不完整。 |
+| CANopen/DS402 | `[未发现实现]` | 当前是UART ASPEP/MCP，不是CANopen。 |
+| 预充/主动泄放 | `[未发现实现]` | 未见继电器和泄放控制。 |
+| ASC主动短路 | `[未发现实现]` | 当前故障策略主要是关PWM。 |
+| 温度降额 | `[未发现实现]` | 有过温保护，无线性降额。 |
+| 应用层位置/轨迹/电子齿轮凸轮 | `[未发现实现]` | 当前主要是速度/转矩控制。 |
+
 ## 一、底层架构
 
 ### 1. MCSDK移植
