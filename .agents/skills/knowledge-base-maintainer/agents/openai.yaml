@@ -1,0 +1,4 @@
+interface:
+  display_name: "Knowledge Base Maintainer"
+  short_description: "Maintain this repository knowledge base consistently"
+  default_prompt: "Use $knowledge-base-maintainer to organize and update this knowledge base."
